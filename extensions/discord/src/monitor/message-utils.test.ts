@@ -1,23 +1,23 @@
 import { ChannelType, type Client, type Message } from "@buape/carbon";
 import { StickerFormatType } from "discord-api-types/v10";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fetchRemoteMedia = vi.fn();
 const saveMediaBuffer = vi.fn();
 
-vi.mock("../../../../src/media/fetch.js", () => ({
+vi.mock("openclaw/plugin-sdk/media-runtime", () => ({
   fetchRemoteMedia: (...args: unknown[]) => fetchRemoteMedia(...args),
 }));
 
-vi.mock("../../../../src/media/store.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../../src/media/store.js")>();
+vi.mock("openclaw/plugin-sdk/media-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/media-runtime")>();
   return {
     ...actual,
     saveMediaBuffer: (...args: unknown[]) => saveMediaBuffer(...args),
   };
 });
 
-vi.mock("../../../../src/globals.js", () => ({
+vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
   logVerbose: () => {},
 }));
 
@@ -28,7 +28,7 @@ let resolveDiscordMessageText: typeof import("./message-utils.js").resolveDiscor
 let resolveForwardedMediaList: typeof import("./message-utils.js").resolveForwardedMediaList;
 let resolveMediaList: typeof import("./message-utils.js").resolveMediaList;
 
-beforeEach(async () => {
+beforeAll(async () => {
   vi.resetModules();
   ({
     __resetDiscordChannelInfoCacheForTest,

@@ -1,6 +1,7 @@
 import type { Mock } from "vitest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PluginCompatibilityNotice } from "../plugins/status.js";
+import { createCompatibilityNotice } from "../plugins/status.test-helpers.js";
 import { captureEnv } from "../test-utils/env.js";
 
 let envSnapshot: ReturnType<typeof captureEnv>;
@@ -139,43 +140,8 @@ function createDefaultProbeGatewayResult(): ProbeGatewayResult {
   };
 }
 
-async function withEnvVar<T>(key: string, value: string, run: () => Promise<T>): Promise<T> {
-  const prevValue = process.env[key];
-  process.env[key] = value;
-  try {
-    return await run();
-  } finally {
-    if (prevValue === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = prevValue;
-    }
-  }
-}
-
-const mocks = vi.hoisted(() => ({
-  hasPotentialConfiguredChannels: vi.fn(() => true),
-  loadConfig: vi.fn().mockReturnValue({ session: {} }),
-  loadSessionStore: vi.fn().mockReturnValue({
-    "+1000": createDefaultSessionStoreEntry(),
-  }),
-  resolveMainSessionKey: vi.fn().mockReturnValue("agent:main:main"),
-  resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
-  webAuthExists: vi.fn().mockResolvedValue(true),
-  getWebAuthAgeMs: vi.fn().mockReturnValue(5000),
-  readWebSelfId: vi.fn().mockReturnValue({ e164: "+1999" }),
-  logWebSelfId: vi.fn(),
-  probeGateway: vi.fn().mockResolvedValue({
-    ...createDefaultProbeGatewayResult(),
-  }),
-  callGateway: vi.fn().mockResolvedValue({}),
-  listGatewayAgentsBasic: vi.fn().mockReturnValue({
-    defaultId: "main",
-    mainKey: "agent:main:main",
-    scope: "per-sender",
-    agents: [{ id: "main", name: "Main" }],
-  }),
-  runSecurityAudit: vi.fn().mockResolvedValue({
+function createDefaultSecurityAuditResult() {
+  return {
     ts: 0,
     summary: { critical: 1, warn: 1, info: 2 },
     findings: [
@@ -205,8 +171,80 @@ const mocks = vi.hoisted(() => ({
         detail: "More FYI",
       },
     ],
+  };
+}
+
+async function withEnvVar<T>(key: string, value: string, run: () => Promise<T>): Promise<T> {
+  const prevValue = process.env[key];
+  process.env[key] = value;
+  try {
+    return await run();
+  } finally {
+    if (prevValue === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = prevValue;
+    }
+  }
+}
+
+const mocks = vi.hoisted(() => ({
+  hasPotentialConfiguredChannels: vi.fn(() => true),
+  loadConfig: vi.fn().mockReturnValue({ session: {} }),
+  loadSessionStore: vi.fn().mockReturnValue({
+    "+1000": createDefaultSessionStoreEntry(),
   }),
+  resolveMainSessionKey: vi.fn().mockReturnValue("agent:main:main"),
+  resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
+  loadNodeHostConfig: vi.fn().mockResolvedValue(null),
+  webAuthExists: vi.fn().mockResolvedValue(true),
+  getWebAuthAgeMs: vi.fn().mockReturnValue(5000),
+  readWebSelfId: vi.fn().mockReturnValue({ e164: "+1999" }),
+  logWebSelfId: vi.fn(),
+  probeGateway: vi.fn().mockResolvedValue({
+    ...createDefaultProbeGatewayResult(),
+  }),
+  callGateway: vi.fn().mockResolvedValue({}),
+  listGatewayAgentsBasic: vi.fn().mockReturnValue({
+    defaultId: "main",
+    mainKey: "agent:main:main",
+    scope: "per-sender",
+    agents: [{ id: "main", name: "Main" }],
+  }),
+  runSecurityAudit: vi.fn().mockResolvedValue(createDefaultSecurityAuditResult()),
   buildPluginCompatibilityNotices: vi.fn((): PluginCompatibilityNotice[] => []),
+  resolveGatewayService: vi.fn().mockReturnValue({
+    label: "LaunchAgent",
+    loadedText: "loaded",
+    notLoadedText: "not loaded",
+    stage: async () => {},
+    install: async () => {},
+    uninstall: async () => {},
+    stop: async () => {},
+    restart: async () => ({ outcome: "completed" as const }),
+    isLoaded: async () => true,
+    readRuntime: async () => ({ status: "running", pid: 1234 }),
+    readCommand: async () => ({
+      programArguments: ["node", "dist/entry.js", "gateway"],
+      sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.gateway.plist",
+    }),
+  }),
+  resolveNodeService: vi.fn().mockReturnValue({
+    label: "LaunchAgent",
+    loadedText: "loaded",
+    notLoadedText: "not loaded",
+    stage: async () => {},
+    install: async () => {},
+    uninstall: async () => {},
+    stop: async () => {},
+    restart: async () => ({ outcome: "completed" as const }),
+    isLoaded: async () => true,
+    readRuntime: async () => ({ status: "running", pid: 4321 }),
+    readCommand: async () => ({
+      programArguments: ["node", "dist/entry.js", "node-host"],
+      sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.node.plist",
+    }),
+  }),
 }));
 
 vi.mock("../channels/config-presence.js", async (importOriginal) => {
@@ -217,8 +255,8 @@ vi.mock("../channels/config-presence.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../memory/index.js", () => ({
-  getMemorySearchManager: vi.fn(async ({ agentId }: { agentId: string }) => ({
+vi.mock("../plugins/memory-runtime.js", () => ({
+  getActiveMemorySearchManager: vi.fn(async ({ agentId }: { agentId: string }) => ({
     manager: {
       probeVectorAvailability: vi.fn(async () => true),
       status: () => ({
@@ -311,7 +349,7 @@ vi.mock("../channels/plugins/index.js", () => ({
       },
     ] as unknown,
 }));
-vi.mock("../../extensions/whatsapp/src/session.js", () => ({
+vi.mock("../plugins/runtime/runtime-whatsapp-boundary.js", () => ({
   webAuthExists: mocks.webAuthExists,
   getWebAuthAgeMs: mocks.getWebAuthAgeMs,
   readWebSelfId: mocks.readWebSelfId,
@@ -382,41 +420,18 @@ vi.mock("../config/config.js", async (importOriginal) => {
     readBestEffortConfig: vi.fn(async () => mocks.loadConfig()),
   };
 });
-vi.mock("../daemon/service.js", () => ({
-  resolveGatewayService: () => ({
-    label: "LaunchAgent",
-    loadedText: "loaded",
-    notLoadedText: "not loaded",
-    stage: async () => {},
-    install: async () => {},
-    uninstall: async () => {},
-    stop: async () => {},
-    restart: async () => ({ outcome: "completed" as const }),
-    isLoaded: async () => true,
-    readRuntime: async () => ({ status: "running", pid: 1234 }),
-    readCommand: async () => ({
-      programArguments: ["node", "dist/entry.js", "gateway"],
-      sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.gateway.plist",
-    }),
-  }),
-}));
+vi.mock("../daemon/service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../daemon/service.js")>();
+  return {
+    ...actual,
+    resolveGatewayService: mocks.resolveGatewayService,
+  };
+});
 vi.mock("../daemon/node-service.js", () => ({
-  resolveNodeService: () => ({
-    label: "LaunchAgent",
-    loadedText: "loaded",
-    notLoadedText: "not loaded",
-    stage: async () => {},
-    install: async () => {},
-    uninstall: async () => {},
-    stop: async () => {},
-    restart: async () => ({ outcome: "completed" as const }),
-    isLoaded: async () => true,
-    readRuntime: async () => ({ status: "running", pid: 4321 }),
-    readCommand: async () => ({
-      programArguments: ["node", "dist/entry.js", "node-host"],
-      sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.node.plist",
-    }),
-  }),
+  resolveNodeService: mocks.resolveNodeService,
+}));
+vi.mock("../node-host/config.js", () => ({
+  loadNodeHostConfig: mocks.loadNodeHostConfig,
 }));
 vi.mock("../security/audit.js", () => ({
   runSecurityAudit: mocks.runSecurityAudit,
@@ -455,6 +470,8 @@ describe("statusCommand", () => {
     mocks.resolveMainSessionKey.mockReturnValue("agent:main:main");
     mocks.resolveStorePath.mockReset();
     mocks.resolveStorePath.mockReturnValue("/tmp/sessions.json");
+    mocks.loadNodeHostConfig.mockReset();
+    mocks.loadNodeHostConfig.mockResolvedValue(null);
     mocks.probeGateway.mockReset();
     mocks.probeGateway.mockResolvedValue(createDefaultProbeGatewayResult());
     mocks.callGateway.mockReset();
@@ -471,36 +488,40 @@ describe("statusCommand", () => {
     mocks.hasPotentialConfiguredChannels.mockReset();
     mocks.hasPotentialConfiguredChannels.mockReturnValue(true);
     mocks.runSecurityAudit.mockReset();
-    mocks.runSecurityAudit.mockResolvedValue({
-      ts: 0,
-      summary: { critical: 1, warn: 1, info: 2 },
-      findings: [
-        {
-          checkId: "test.critical",
-          severity: "critical",
-          title: "Test critical finding",
-          detail: "Something is very wrong\nbut on two lines",
-          remediation: "Do the thing",
-        },
-        {
-          checkId: "test.warn",
-          severity: "warn",
-          title: "Test warning finding",
-          detail: "Something is maybe wrong",
-        },
-        {
-          checkId: "test.info",
-          severity: "info",
-          title: "Test info finding",
-          detail: "FYI only",
-        },
-        {
-          checkId: "test.info2",
-          severity: "info",
-          title: "Another info finding",
-          detail: "More FYI",
-        },
-      ],
+    mocks.runSecurityAudit.mockResolvedValue(createDefaultSecurityAuditResult());
+    mocks.resolveGatewayService.mockReset();
+    mocks.resolveGatewayService.mockReturnValue({
+      label: "LaunchAgent",
+      loadedText: "loaded",
+      notLoadedText: "not loaded",
+      stage: async () => {},
+      install: async () => {},
+      uninstall: async () => {},
+      stop: async () => {},
+      restart: async () => ({ outcome: "completed" as const }),
+      isLoaded: async () => true,
+      readRuntime: async () => ({ status: "running", pid: 1234 }),
+      readCommand: async () => ({
+        programArguments: ["node", "dist/entry.js", "gateway"],
+        sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.gateway.plist",
+      }),
+    });
+    mocks.resolveNodeService.mockReset();
+    mocks.resolveNodeService.mockReturnValue({
+      label: "LaunchAgent",
+      loadedText: "loaded",
+      notLoadedText: "not loaded",
+      stage: async () => {},
+      install: async () => {},
+      uninstall: async () => {},
+      stop: async () => {},
+      restart: async () => ({ outcome: "completed" as const }),
+      isLoaded: async () => true,
+      readRuntime: async () => ({ status: "running", pid: 4321 }),
+      readCommand: async () => ({
+        programArguments: ["node", "dist/entry.js", "node-host"],
+        sourcePath: "/tmp/Library/LaunchAgents/ai.openclaw.node.plist",
+      }),
     });
     runtimeLogMock.mockClear();
     (runtime.error as Mock<(...args: unknown[]) => void>).mockClear();
@@ -509,13 +530,7 @@ describe("statusCommand", () => {
   it("prints JSON when requested", async () => {
     mocks.hasPotentialConfiguredChannels.mockReturnValue(false);
     mocks.buildPluginCompatibilityNotices.mockReturnValue([
-      {
-        pluginId: "legacy-plugin",
-        code: "legacy-before-agent-start",
-        severity: "warn",
-        message:
-          "still uses legacy before_agent_start; keep regression coverage on this plugin, and prefer before_model_resolve/before_prompt_build for new work.",
-      },
+      createCompatibilityNotice({ pluginId: "legacy-plugin", code: "legacy-before-agent-start" }),
     ]);
     await statusCommand({ json: true }, runtime as never);
     const payload = JSON.parse(String(runtimeLogMock.mock.calls[0]?.[0]));
@@ -541,6 +556,13 @@ describe("statusCommand", () => {
       count: 0,
       warnings: [],
     });
+    expect(payload.tasks).toEqual(
+      expect.objectContaining({
+        total: 0,
+        active: 0,
+        byStatus: expect.objectContaining({ queued: 0, running: 0 }),
+      }),
+    );
     expect(mocks.runSecurityAudit).toHaveBeenCalledWith(
       expect.objectContaining({
         includeFilesystem: true,
@@ -570,13 +592,7 @@ describe("statusCommand", () => {
 
   it("prints formatted lines otherwise", async () => {
     mocks.buildPluginCompatibilityNotices.mockReturnValue([
-      {
-        pluginId: "legacy-plugin",
-        code: "legacy-before-agent-start",
-        severity: "warn",
-        message:
-          "still uses legacy before_agent_start; keep regression coverage on this plugin, and prefer before_model_resolve/before_prompt_build for new work.",
-      },
+      createCompatibilityNotice({ pluginId: "legacy-plugin", code: "legacy-before-agent-start" }),
     ]);
     const logs = await runStatusAndGetLogs();
     for (const token of [
@@ -592,6 +608,7 @@ describe("statusCommand", () => {
       "Channels",
       "WhatsApp",
       "bootstrap files",
+      "Tasks",
       "Sessions",
       "+1000",
       "50%",
@@ -613,6 +630,77 @@ describe("statusCommand", () => {
           line.includes("openclaw --profile isolated status --all"),
       ),
     ).toBe(true);
+  });
+
+  it("caps cached percentage at the prompt-token denominator for legacy session totals", async () => {
+    const originalLoadSessionStore = mocks.loadSessionStore.getMockImplementation();
+    mocks.loadSessionStore.mockReturnValue({
+      "+1000": {
+        ...createDefaultSessionStoreEntry(),
+        inputTokens: undefined,
+        cacheRead: 1_200,
+        cacheWrite: 0,
+        totalTokens: 1_000,
+      },
+    });
+    try {
+      const logs = await runStatusAndGetLogs();
+      expect(logs.some((line) => line.includes("100% cached"))).toBe(true);
+      expect(logs.some((line) => line.includes("120% cached"))).toBe(false);
+    } finally {
+      if (originalLoadSessionStore) {
+        mocks.loadSessionStore.mockImplementation(originalLoadSessionStore);
+      }
+    }
+  });
+
+  it("uses prompt-side tokens for cached percentage when they differ from totalTokens", async () => {
+    const originalLoadSessionStore = mocks.loadSessionStore.getMockImplementation();
+    mocks.loadSessionStore.mockReturnValue({
+      "+1000": {
+        ...createDefaultSessionStoreEntry(),
+        inputTokens: 500,
+        cacheRead: 2_000,
+        cacheWrite: 500,
+        totalTokens: 5_000,
+      },
+    });
+    try {
+      const logs = await runStatusAndGetLogs();
+      expect(logs.some((line) => line.includes("67% cached"))).toBe(true);
+      expect(logs.some((line) => line.includes("40% cached"))).toBe(false);
+    } finally {
+      if (originalLoadSessionStore) {
+        mocks.loadSessionStore.mockImplementation(originalLoadSessionStore);
+      }
+    }
+  });
+
+  it("shows node-only gateway info when no local gateway service is installed", async () => {
+    mocks.resolveGatewayService.mockReturnValueOnce({
+      label: "LaunchAgent",
+      loadedText: "loaded",
+      notLoadedText: "not loaded",
+      stage: async () => {},
+      install: async () => {},
+      uninstall: async () => {},
+      stop: async () => {},
+      restart: async () => ({ outcome: "completed" as const }),
+      isLoaded: async () => false,
+      readRuntime: async () => undefined,
+      readCommand: async () => null,
+    });
+    mocks.loadNodeHostConfig.mockResolvedValueOnce({
+      version: 1,
+      nodeId: "node-1",
+      gateway: { host: "gateway.example.com", port: 19000 },
+    });
+
+    const joined = await runStatusAndGetJoinedLogs();
+    expect(joined).toContain("node → gateway.example.com:19000 · no local gateway");
+    expect(joined).not.toContain("Gateway: local · ws://127.0.0.1:18789");
+    expect(joined).toContain("openclaw --profile isolated node status");
+    expect(joined).not.toContain("Fix reachability first");
   });
 
   it("shows gateway auth when reachable", async () => {

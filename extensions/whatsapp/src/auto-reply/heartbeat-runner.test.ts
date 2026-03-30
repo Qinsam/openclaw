@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
-import { HEARTBEAT_TOKEN } from "../../../../src/auto-reply/tokens.js";
-import { redactIdentifier } from "../../../../src/logging/redact-identifier.js";
+import { redactIdentifier } from "openclaw/plugin-sdk/logging-core";
+import type { getReplyFromConfig } from "openclaw/plugin-sdk/reply-runtime";
+import { HEARTBEAT_TOKEN } from "openclaw/plugin-sdk/reply-runtime";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { sendMessageWhatsApp } from "../send.js";
 
 const state = vi.hoisted(() => ({
@@ -57,8 +57,8 @@ vi.mock("openclaw/plugin-sdk/routing", async (importOriginal) => {
   };
 });
 
-vi.mock("openclaw/plugin-sdk/infra-runtime", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/infra-runtime")>();
+vi.mock("openclaw/plugin-sdk/channel-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/channel-runtime")>();
   return {
     ...actual,
     resolveHeartbeatVisibility: () => state.visibility,
@@ -91,11 +91,11 @@ vi.mock("openclaw/plugin-sdk/text-runtime", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../../src/auto-reply/reply.js", () => ({
+vi.mock("openclaw/plugin-sdk/reply-runtime", () => ({
   getReplyFromConfig: vi.fn(async () => undefined),
 }));
 
-vi.mock("../../../../src/config/sessions.js", () => ({
+vi.mock("openclaw/plugin-sdk/config-runtime", () => ({
   loadSessionStore: () => state.store,
   resolveSessionKey: () => "k",
   resolveStorePath: () => "/tmp/store.json",
@@ -160,8 +160,12 @@ describe("runWebHeartbeatOnce", () => {
     ...overrides,
   });
 
-  beforeEach(async () => {
+  beforeAll(async () => {
     vi.resetModules();
+    ({ runWebHeartbeatOnce } = await import("./heartbeat-runner.js"));
+  });
+
+  beforeEach(() => {
     state.visibility = { showAlerts: true, showOk: true, useIndicator: false };
     state.store = { k: { updatedAt: 999, sessionId: "s1" } };
     state.snapshot = {
@@ -182,7 +186,6 @@ describe("runWebHeartbeatOnce", () => {
     sender = senderMock as unknown as typeof sendMessageWhatsApp;
     replyResolverMock = vi.fn(async () => undefined);
     replyResolver = replyResolverMock as unknown as typeof getReplyFromConfig;
-    ({ runWebHeartbeatOnce } = await import("./heartbeat-runner.js"));
   });
 
   it("supports manual override body dry-run without sending", async () => {
