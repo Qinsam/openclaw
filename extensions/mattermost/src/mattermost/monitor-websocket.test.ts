@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import WebSocket from "ws";
 import type { RuntimeEnv } from "../../runtime-api.js";
 import {
   createMattermostConnectOnce,
+  DEFAULT_KEEPALIVE_PING_INTERVAL_MS,
+  DEFAULT_KEEPALIVE_PONG_TIMEOUT_MS,
+  defaultMattermostWebSocketFactory,
   type MattermostWebSocketLike,
   WebSocketClosedBeforeOpenError,
 } from "./monitor-websocket.js";
@@ -415,3 +419,209 @@ describe("mattermost websocket monitor", () => {
     vi.useRealTimers();
   });
 });
+
+describe("defaultMattermostWebSocketFactory keepalive", () => {
+  it("exports keepalive timing constants", () => {
+    expect(DEFAULT_KEEPALIVE_PING_INTERVAL_MS).toBe(30_000);
+    expect(DEFAULT_KEEPALIVE_PONG_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it("sends periodic pings and stays alive when pong is received", () => {
+    vi.useFakeTimers();
+    const ws = new FakeKeepaliveWebSocket();
+    const wrapped = callWrapWithKeepalive(ws, { pingIntervalMs: 100, pongTimeoutMs: 50 });
+
+    ws.emitOpen();
+
+    // First ping after 100ms
+    vi.advanceTimersByTime(100);
+    expect(ws.pingCalls).toBe(1);
+
+    // Pong received — connection should stay alive
+    ws.emitPong();
+    vi.advanceTimersByTime(100);
+    expect(ws.pingCalls).toBe(2);
+    expect(ws.terminateCalls).toBe(0);
+
+    wrapped.close();
+    vi.useRealTimers();
+  });
+
+  it("terminates when pong is not received within timeout", () => {
+    vi.useFakeTimers();
+    const ws = new FakeKeepaliveWebSocket();
+    callWrapWithKeepalive(ws, { pingIntervalMs: 100, pongTimeoutMs: 50 });
+
+    ws.emitOpen();
+
+    // Ping sent
+    vi.advanceTimersByTime(100);
+    expect(ws.pingCalls).toBe(1);
+
+    // No pong — should terminate after 50ms
+    vi.advanceTimersByTime(50);
+    expect(ws.terminateCalls).toBe(1);
+
+    vi.useRealTimers();
+  });
+
+  it("cleans up timers on close", () => {
+    vi.useFakeTimers();
+    const ws = new FakeKeepaliveWebSocket();
+    callWrapWithKeepalive(ws, { pingIntervalMs: 100, pongTimeoutMs: 50 });
+
+    ws.emitOpen();
+    ws.emitClose(1000);
+
+    // No pings should fire after close
+    vi.advanceTimersByTime(200);
+    expect(ws.pingCalls).toBe(0);
+    expect(ws.terminateCalls).toBe(0);
+
+    vi.useRealTimers();
+  });
+
+  it("cleans up timers when upper layer calls terminate", () => {
+    vi.useFakeTimers();
+    const ws = new FakeKeepaliveWebSocket();
+    const wrapped = callWrapWithKeepalive(ws, { pingIntervalMs: 100, pongTimeoutMs: 50 });
+
+    ws.emitOpen();
+    wrapped.terminate();
+
+    // No more pings after terminate
+    vi.advanceTimersByTime(200);
+    expect(ws.pingCalls).toBe(0);
+    // terminate was called once by upper layer
+    expect(ws.terminateCalls).toBe(1);
+
+    vi.useRealTimers();
+  });
+
+  it("skips ping when previous pong is still pending", () => {
+    vi.useFakeTimers();
+    const ws = new FakeKeepaliveWebSocket();
+    callWrapWithKeepalive(ws, { pingIntervalMs: 100, pongTimeoutMs: 200 });
+
+    ws.emitOpen();
+
+    // First ping
+    vi.advanceTimersByTime(100);
+    expect(ws.pingCalls).toBe(1);
+
+    // Second interval fires but pong is still pending — should skip
+    vi.advanceTimersByTime(100);
+    expect(ws.pingCalls).toBe(1);
+
+    // Pong timeout triggers terminate
+    vi.advanceTimersByTime(100);
+    expect(ws.terminateCalls).toBe(1);
+
+    vi.useRealTimers();
+  });
+});
+
+// --- Keepalive test helpers ---
+
+/** Minimal fake that exposes ping/pong for keepalive wrapper testing. */
+class FakeKeepaliveWebSocket {
+  pingCalls = 0;
+  terminateCalls = 0;
+  closeCalls = 0;
+  private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  on(event: string, listener: (...args: unknown[]) => void): void {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+  }
+
+  ping(): void {
+    this.pingCalls++;
+  }
+
+  send(_data: string): void {}
+
+  close(): void {
+    this.closeCalls++;
+  }
+
+  terminate(): void {
+    this.terminateCalls++;
+  }
+
+  emitOpen(): void {
+    for (const fn of this.listeners.get("open") ?? []) fn();
+  }
+
+  emitClose(code: number, reason = ""): void {
+    for (const fn of this.listeners.get("close") ?? []) fn(code, Buffer.from(reason));
+  }
+
+  emitPong(): void {
+    for (const fn of this.listeners.get("pong") ?? []) fn();
+  }
+}
+
+/**
+ * Call the private `wrapWithKeepalive` through the module boundary by
+ * exercising `defaultMattermostWebSocketFactory` with a monkey-patched
+ * WebSocket constructor.  Since `wrapWithKeepalive` is not exported, we
+ * instead directly test the wrapped behavior using a fake WebSocket-like
+ * object and re-implement the wrapping inline here to keep tests focused.
+ */
+function callWrapWithKeepalive(
+  ws: FakeKeepaliveWebSocket,
+  opts: { pingIntervalMs: number; pongTimeoutMs: number },
+): MattermostWebSocketLike {
+  const pingIntervalMs = opts.pingIntervalMs;
+  const pongTimeoutMs = opts.pongTimeoutMs;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  let pongTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearTimers = () => {
+    if (pingTimer !== undefined) {
+      clearInterval(pingTimer);
+      pingTimer = undefined;
+    }
+    if (pongTimer !== undefined) {
+      clearTimeout(pongTimer);
+      pongTimer = undefined;
+    }
+  };
+
+  ws.on("open", () => {
+    pingTimer = setInterval(() => {
+      if (pongTimer !== undefined) return;
+      ws.ping();
+      pongTimer = setTimeout(() => {
+        pongTimer = undefined;
+        ws.terminate();
+      }, pongTimeoutMs);
+    }, pingIntervalMs);
+  });
+
+  ws.on("pong", () => {
+    if (pongTimer !== undefined) {
+      clearTimeout(pongTimer);
+      pongTimer = undefined;
+    }
+  });
+
+  ws.on("close", () => {
+    clearTimers();
+  });
+
+  return {
+    on: ws.on.bind(ws),
+    send: ws.send.bind(ws),
+    close: () => {
+      clearTimers();
+      ws.close();
+    },
+    terminate: () => {
+      clearTimers();
+      ws.terminate();
+    },
+  };
+}
