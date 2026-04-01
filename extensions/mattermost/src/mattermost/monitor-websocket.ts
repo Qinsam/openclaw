@@ -100,8 +100,82 @@ type CreateMattermostConnectOnceOpts = {
   healthCheckIntervalMs?: number;
 };
 
+export type KeepaliveOptions = {
+  /** Interval between ping frames in milliseconds (default: 30000). */
+  pingIntervalMs?: number;
+  /** Time to wait for a pong response before terminating (default: 10000). */
+  pongTimeoutMs?: number;
+};
+
+/**
+ * Wraps a raw WebSocket with protocol-level ping/pong keepalive.
+ *
+ * After `open`, sends a ping frame every `pingIntervalMs`.  If a pong is not
+ * received within `pongTimeoutMs` the socket is terminated, which surfaces as
+ * a normal `close` event to the upper layer and triggers the reconnect loop.
+ */
+function wrapWithKeepalive(ws: WebSocket, opts: KeepaliveOptions = {}): MattermostWebSocketLike {
+  const pingIntervalMs = opts.pingIntervalMs ?? 30_000;
+  const pongTimeoutMs = opts.pongTimeoutMs ?? 10_000;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  let pongTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearKeepaliveTimers = () => {
+    if (pingTimer !== undefined) {
+      clearInterval(pingTimer);
+      pingTimer = undefined;
+    }
+    if (pongTimer !== undefined) {
+      clearTimeout(pongTimer);
+      pongTimer = undefined;
+    }
+  };
+
+  ws.on("open", () => {
+    pingTimer = setInterval(() => {
+      if (pongTimer !== undefined) {
+        return; // previous ping still waiting for pong
+      }
+      ws.ping();
+      pongTimer = setTimeout(() => {
+        pongTimer = undefined;
+        ws.terminate();
+      }, pongTimeoutMs);
+    }, pingIntervalMs);
+  });
+
+  ws.on("pong", () => {
+    if (pongTimer !== undefined) {
+      clearTimeout(pongTimer);
+      pongTimer = undefined;
+    }
+  });
+
+  ws.on("close", () => {
+    clearKeepaliveTimers();
+  });
+
+  // Wrap terminate/close to clean up timers when called by upper layer
+  const origTerminate = ws.terminate.bind(ws);
+  const origClose = ws.close.bind(ws);
+  const wrapped = ws as unknown as MattermostWebSocketLike;
+  (wrapped as { terminate: () => void }).terminate = () => {
+    clearKeepaliveTimers();
+    origTerminate();
+  };
+  (wrapped as { close: () => void }).close = () => {
+    clearKeepaliveTimers();
+    origClose();
+  };
+
+  return wrapped;
+}
+
+export const DEFAULT_KEEPALIVE_PING_INTERVAL_MS = 30_000;
+export const DEFAULT_KEEPALIVE_PONG_TIMEOUT_MS = 10_000;
+
 export const defaultMattermostWebSocketFactory: MattermostWebSocketFactory = (url) =>
-  new WebSocket(url) as MattermostWebSocketLike;
+  wrapWithKeepalive(new WebSocket(url));
 
 export function parsePostedPayload(
   payload: MattermostEventPayload,
